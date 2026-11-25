@@ -1,0 +1,10 @@
+[gd_scene format=3 uid="uid://cb68ol8onwt40"]
+
+[ext_resource type="Script" uid="uid://cus4yf17es2mu" path="res://scripts/rhythm_battle.gd" id="1_0wfyh"]
+[ext_resource type="Script" uid="uid://cm4xhebsr7wcf" path="res://scripts/conductor.gd" id="2_sugp2"]
+
+[node name="RhythmBattle" type="Node2D" unique_id=1539421500]
+script = ExtResource("1_0wfyh")
+
+[node name="Conductor" type="Node2D" parent="." unique_id=245288324]
+script = ExtResource("2_sugp2")

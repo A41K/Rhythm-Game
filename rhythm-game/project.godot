@@ -11,8 +11,13 @@ config_version=5
 [application]
 
 config/name="Rhythm Game"
+run/main_scene="uid://b45lco2gvu2ie"
 config/features=PackedStringArray("4.7", "Forward Plus")
 config/icon="res://icon.svg"
+
+[autoload]
+
+Conductor="*uid://cm4xhebsr7wcf"
 
 [display]
 
