@@ -25,6 +25,7 @@ var sprite: Texture2D = null
 var looking_left: bool = false
 var path_to: Callable = Callable()
 var random_point: Callable = Callable()
+var hold: bool = false
 
 
 func _ready() -> void:
@@ -58,6 +59,10 @@ func _physics_process(_delta: float) -> void:
 		if to_target.length() < aggro_radius:
 			velocity = to_target.normalized() * chase_speed
 	move_and_slide()
+	if hold:
+		velocity = Vector2.ZERO
+		move_and_slide()
+		return
 
 
 func _process(delta: float) -> void:

@@ -401,7 +401,6 @@ func _physics_process(_delta: float) -> void:
 				_use_door(side)
 				return
 
-
 func _process(delta: float) -> void:
 	for p in popups:
 		p["pos"] = (p["pos"] as Vector2) + Vector2(0, -45.0 * delta)
