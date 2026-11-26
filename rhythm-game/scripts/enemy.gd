@@ -1,5 +1,5 @@
-class_name Enemy
 extends CharacterBody2D
+class_name Enemy
 
 signal died
 
@@ -23,19 +23,27 @@ var hurt_flash: float = 0.0
 var beat_pulse: float = 0.0
 var sprite: Texture2D = null
 var looking_left: bool = false
+var path_to: Callable = Callable()
+var random_point: Callable = Callable()
 
 
 func _ready() -> void:
 	motion_mode = CharacterBody2D.MOTION_MODE_FLOATING
 	hp = max_hp
+
+	add_to_group("enemies")
+
 	if ResourceLoader.exists(sprite_path):
 		sprite = load(sprite_path)
+
 	var shape: CollisionShape2D = CollisionShape2D.new()
 	var circle: CircleShape2D = CircleShape2D.new()
 	circle.radius = collision_radius
 	shape.shape = circle
 	add_child(shape)
+
 	Conductor.beat.connect(_on_beat)
+	
 
 
 func _on_beat(_beat_number: int) -> void:

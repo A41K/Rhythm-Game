@@ -8,12 +8,15 @@ const ENGAGE_RANGE: float = 75.0
 const DAMAGE_TO_ENEMY: Dictionary = {"Perfect": 6.0, "Good": 4.0, "Bad": 2.0}
 const MISS_DAMAGE_TO_PLAYER: float = 5.0
 const PIXEL_ART: bool = true
-const DOOR_DEPTH: float = 40.0  
-const DOOR_ENTRY_OFFSET: float = 100.0  
+const DOOR_DEPTH: float = 40.0 
+const DOOR_ENTRY_OFFSET: float = 100.0 
 const DEFAULT_BG: String = "res://assets/sprites/room_bg.png"
 const DEFAULT_ROCK: String = "res://assets/sprites/rock.png"
 const DEFAULT_DOOR_OPEN: String = "res://assets/sprites/door_open.png"
 const DEFAULT_DOOR_CLOSED: String = "res://assets/sprites/door_closed.png"
+const DIRS: Dictionary = {
+	"top": Vector2i(0, -1), "bottom": Vector2i(0, 1), "left": Vector2i(-1, 0), "right": Vector2i(1, 0),
+}
 const DEFAULT_ROOM: Dictionary = {
 	"name": "Default room",
 	"layout": [
@@ -26,16 +29,23 @@ const DEFAULT_ROOM: Dictionary = {
 		".............",
 	],
 	"enemies": {"a": {}},
-	"doors": {},
 }
 
 @export_file("*.json") var start_room: String = "res://rooms/start.json"
+@export_dir var pool_dir: String = "res://rooms/pool"
+@export var rooms_per_floor: int = 8
 
-static var current_room: String = ""
-static var cleared_rooms: Dictionary = {}
-static var entered_from: String = ""
+var path_to: Callable = Callable()
+var random_point: Callable = Callable()
+
+static var floor_map: Dictionary = {}  
+static var cleared_rooms: Dictionary = {}  
+static var visited_rooms: Dictionary = {}  
+static var current_cell: Vector2i = Vector2i.ZERO
+static var entered_from: String = ""  
 static var saved_hp: float = -1.0
 
+const Player = preload("res://scripts/player.gd")
 var player: Player
 var battle: RhythmBattle
 var enemies: Array[Enemy] = []
@@ -50,9 +60,10 @@ var popups: Array[Dictionary] = []
 
 var room_path: String = ""
 var room_data: Dictionary = {}
-var doors: Dictionary = {} 
+var doors: Dictionary = {}  
+var astar: AStarGrid2D = null
 var rocks: Array[Vector2i] = []
-var spawns: Array[Dictionary] = []
+var spawns: Array[Dictionary] = []  
 var player_start: Vector2 = Vector2.ZERO
 
 var bg: Texture2D = null
@@ -67,11 +78,19 @@ func _ready() -> void:
 	if PIXEL_ART:
 		texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 
-	room_path = current_room if current_room != "" else start_room
+	if floor_map.is_empty():
+		_generate_floor()
+	room_path = floor_map[current_cell]
+	visited_rooms[current_cell] = true
 	room_data = _load_room(room_path)
+	doors.clear()
+	for side: String in DIRS:
+		if floor_map.has(current_cell + (DIRS[side] as Vector2i)):
+			doors[side] = true
 	_parse_layout()
+	_build_nav()
 	_load_textures()
-	room_cleared = cleared_rooms.has(room_path)
+	room_cleared = cleared_rooms.has(current_cell)
 
 	_build_walls()
 	_build_rocks()
@@ -88,6 +107,92 @@ func _ready() -> void:
 	battle.chart_finished.connect(_on_chart_finished)
 	player.died.connect(_on_player_died)
 
+func _scan_pool() -> Array:
+	var out: Array = []
+	var dir: DirAccess = DirAccess.open(pool_dir)
+	if dir != null:
+		for f in dir.get_files():
+			if f.ends_with(".json"):
+				out.append(pool_dir.path_join(f))
+	out.sort()
+	if out.is_empty():
+		push_warning("No room templates found in '%s', using the default room." % pool_dir)
+		out.append("")
+	return out
+
+
+func _generate_floor() -> void:
+	floor_map = {}
+	cleared_rooms = {}
+	visited_rooms = {}
+	current_cell = Vector2i.ZERO
+	entered_from = ""
+	saved_hp = -1.0
+	floor_map[Vector2i.ZERO] = start_room
+	var pool: Array = _scan_pool()
+	var bag: Array = []
+	var tries: int = 0
+	while floor_map.size() < rooms_per_floor and tries < 1000:
+		tries += 1
+		var from: Vector2i = floor_map.keys().pick_random()
+		var cell: Vector2i = from + (DIRS.values().pick_random() as Vector2i)
+		if floor_map.has(cell) or _neighbor_count(cell) > 1:
+			continue 
+		if bag.is_empty():
+			bag = pool.duplicate()  
+			bag.shuffle()
+		floor_map[cell] = bag.pop_back()
+
+
+func _neighbor_count(cell: Vector2i) -> int:
+	var n: int = 0
+	for side: String in DIRS:
+		if floor_map.has(cell + (DIRS[side] as Vector2i)):
+			n += 1
+	return n
+
+func _build_nav() -> void:
+	astar = AStarGrid2D.new()
+	astar.region = Rect2i(0, 0, COLS, ROWS)
+	astar.cell_size = Vector2(TILE, TILE)
+	astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+	astar.update()
+	for cell in rocks:
+		astar.set_point_solid(cell, true)
+
+
+func _world_to_cell(p: Vector2) -> Vector2i:
+	var c: Vector2i = Vector2i(((p - ROOM_RECT.position) / TILE).floor())
+	return Vector2i(clampi(c.x, 0, COLS - 1), clampi(c.y, 0, ROWS - 1))
+
+
+func _nav_path(from: Vector2, to: Vector2) -> PackedVector2Array:
+	var out: PackedVector2Array = PackedVector2Array()
+	var a: Vector2i = _world_to_cell(from)
+	var b: Vector2i = _world_to_cell(to)
+	if astar.is_point_solid(a) or astar.is_point_solid(b):
+		out.append(to)
+		return out
+	var ids: Array = astar.get_id_path(a, b)
+	for i in range(1, ids.size()):
+		out.append(_cell_center(ids[i]))
+	if out.is_empty():
+		out.append(to)
+	else:
+		out[out.size() - 1] = to
+	return out
+
+
+func _nav_random_point(near: Vector2, radius: float) -> Vector2:
+	for i in 12:
+		var p: Vector2 = near + Vector2.from_angle(randf() * TAU) * randf_range(radius * 0.4, radius)
+		p.x = clampf(p.x, ROOM_RECT.position.x + 40.0, ROOM_RECT.end.x - 40.0)
+		p.y = clampf(p.y, ROOM_RECT.position.y + 40.0, ROOM_RECT.end.y - 40.0)
+		if not astar.is_point_solid(_world_to_cell(p)):
+			return p
+	return near
+
+
 func _load_room(path: String) -> Dictionary:
 	var file: FileAccess = FileAccess.open(path, FileAccess.READ)
 	if file == null:
@@ -103,7 +208,6 @@ func _load_room(path: String) -> Dictionary:
 func _parse_layout() -> void:
 	rocks.clear()
 	spawns.clear()
-	doors = room_data.get("doors", {})
 	player_start = _cell_center(Vector2i(1, ROWS / 2))
 	var rows: Array = room_data.get("layout", [])
 	if rows.size() != ROWS:
@@ -116,11 +220,20 @@ func _parse_layout() -> void:
 			var ch: String = line[c]
 			var cell: Vector2i = Vector2i(c, r)
 			if ch == "#":
-				rocks.append(cell)
+				if _is_door_approach(cell):
+					push_warning("Room '%s': rock at %s blocks a door entrance, ignored." % [room_path, cell])
+				else:
+					rocks.append(cell)
 			elif ch == "P":
 				player_start = _cell_center(cell)
 			elif ch >= "a" and ch <= "z":
 				spawns.append({"cell": cell, "type": ch})
+
+
+func _is_door_approach(cell: Vector2i) -> bool:
+	if cell.x == COLS / 2 and (cell.y <= 1 or cell.y >= ROWS - 2):
+		return true
+	return cell.y == ROWS / 2 and (cell.x <= 1 or cell.x >= COLS - 2)
 
 
 func _load_textures() -> void:
@@ -141,15 +254,25 @@ func _tex(key: String, default_path: String) -> Texture2D:
 func _cell_center(cell: Vector2i) -> Vector2:
 	return ROOM_RECT.position + (Vector2(cell) + Vector2(0.5, 0.5)) * TILE
 
+
 func _spawn_player() -> void:
 	player = Player.new()
 	player.position = player_start
+
 	if entered_from != "" and doors.has(entered_from):
 		player.position = _door_entry_point(entered_from)
+
 	add_child(player)
+	
+	player.visible = true
+	player.modulate = Color.WHITE
+	player.z_index = 100
+	player.queue_redraw()
+
 	if saved_hp > 0.0:
 		player.hp = minf(saved_hp, player.max_hp)
 
+	print("PLAYER SPRITE TEST: ", player.sprite)
 
 func _spawn_enemies() -> void:
 	if room_cleared:
@@ -160,12 +283,16 @@ func _spawn_enemies() -> void:
 		var enemy: Enemy = _make_enemy(defs.get(type_key, {}), type_key)
 		enemy.position = _cell_center(s["cell"])
 		enemy.target = player
+		print(enemy.get_script().resource_path)
+		print(enemy.get_script().get_script_method_list())
+		enemy.path_to = _nav_path
+		enemy.random_point = _nav_random_point
 		add_child(enemy)
 		enemy.died.connect(_on_enemy_died.bind(enemy))
 		enemies.append(enemy)
 	if enemies.is_empty():
 		room_cleared = true
-		cleared_rooms[room_path] = true
+		cleared_rooms[current_cell] = true
 
 
 func _make_enemy(def_in: Variant, type_key: String) -> Enemy:
@@ -255,11 +382,10 @@ func _opposite(side: String) -> String:
 func _use_door(side: String) -> void:
 	leaving = true
 	saved_hp = player.hp
-	current_room = str(doors[side])
+	current_cell += DIRS[side] as Vector2i
 	entered_from = _opposite(side)
 	Conductor.stop()
 	get_tree().reload_current_scene.call_deferred()
-
 
 func _physics_process(_delta: float) -> void:
 	if fighting or leaving or state_text != "":
@@ -271,7 +397,7 @@ func _physics_process(_delta: float) -> void:
 				return
 	else:
 		for side: String in doors:
-			if str(doors[side]) != "" and _door_rect(side).has_point(player.position):
+			if _door_rect(side).has_point(player.position):
 				_use_door(side)
 				return
 
@@ -287,10 +413,7 @@ func _process(delta: float) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_R:
-		current_room = ""
-		cleared_rooms.clear()
-		entered_from = ""
-		saved_hp = -1.0
+		floor_map = {} 
 		Conductor.stop()
 		get_tree().reload_current_scene()
 
@@ -301,6 +424,9 @@ func _start_fight(e: Enemy) -> void:
 	player.can_move = false
 	player.face(e.global_position)
 	e.engaged = true
+	for other in enemies:
+		if other != e:
+			other.hold = true 
 	battle.start_chart(e.chart_path, e.song_path)
 
 
@@ -333,10 +459,12 @@ func _on_enemy_died(e: Enemy) -> void:
 		active_enemy = null
 		battle.stop()
 		player.can_move = true
+		for other in enemies:
+			other.hold = false
 	e.queue_free()
 	if enemies.is_empty():
 		room_cleared = true
-		cleared_rooms[room_path] = true
+		cleared_rooms[current_cell] = true
 		banner_text = "ROOM CLEARED"
 		banner_timer = 2.0
 
@@ -349,7 +477,6 @@ func _on_player_died() -> void:
 		e.target = null
 	active_enemy = null
 	state_text = "YOU DIED  -  press R to reset"
-
 
 func _draw() -> void:
 	var font: Font = ThemeDB.fallback_font
@@ -376,11 +503,12 @@ func _draw() -> void:
 		else:
 			draw_rect(rect.grow(-4.0), Color("4a4d63"))
 			draw_rect(rect.grow(-4.0), Color("1d1e29"), false, 3.0)
-
-	draw_rect(Rect2(40, 12, 200, 16), Color(0, 0, 0, 0.5))
-	draw_rect(Rect2(40, 12, 200.0 * clampf(player.hp / player.max_hp, 0.0, 1.0), 16), Color("4fc3f7"))
-	draw_string(font, Vector2(248, 26), "HP %d" % int(player.hp), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+		draw_rect(Rect2(40, 12, 200, 16), Color(0, 0, 0, 0.5))
+		draw_rect(Rect2(40, 12, 200.0 * clampf(player.hp / player.max_hp, 0.0, 1.0), 16), Color("4fc3f7"))
+		draw_string(font, Vector2(248, 26), "HP %d" % int(player.hp), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
 	draw_string(font, Vector2(330, 26), "%s   (%d left)" % [str(room_data.get("name", "")), enemies.size()], HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+
+	_draw_minimap()
 
 	for p in popups:
 		var a: float = clampf(float(p["life"]) / 0.8, 0.0, 1.0)
@@ -390,8 +518,27 @@ func _draw() -> void:
 		draw_string(font, Vector2(0, 330), state_text, HORIZONTAL_ALIGNMENT_CENTER, 760, 32)
 	elif banner_timer > 0.0:
 		draw_string(font, Vector2(0, 330), banner_text, HORIZONTAL_ALIGNMENT_CENTER, 760, 32, Color(1, 1, 1, clampf(banner_timer, 0.0, 1.0)))
-	elif not fighting:
-		draw_string(font, Vector2(40, 632), "WASD / arrows: move   -   walk into an enemy to fight   -   in a fight: arrows or DFJK   -   R: restart run", HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+
+func _draw_minimap() -> void:
+	var cell_size: Vector2 = Vector2(24, 17)
+	var gap: float = 4.0
+	var origin: Vector2 = Vector2(1060, 70)
+	for cell: Vector2i in floor_map:
+		var seen: bool = visited_rooms.has(cell)
+		if not seen:
+			var near: bool = false
+			for side: String in DIRS:
+				if visited_rooms.has(cell + (DIRS[side] as Vector2i)):
+					near = true
+			if not near:
+				continue
+		var rect: Rect2 = Rect2(origin + Vector2(cell) * (cell_size + Vector2(gap, gap)) - cell_size * 0.5, cell_size)
+		var col: Color = Color(1, 1, 1, 0.18)
+		if seen:
+			col = Color("8a3b3b") if not cleared_rooms.has(cell) else Color("9aa3c7")
+		draw_rect(rect, col)
+		if cell == current_cell:
+			draw_rect(rect.grow(2.0), Color.WHITE, false, 2.0)
 
 
 func _draw_door(side: String) -> void:
